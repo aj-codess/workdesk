@@ -3,6 +3,7 @@
 import { NextResponse } from "next/server";
 import { Errors, ApiError } from "@/utilities/api-error";
 import { hasPermission } from "@/utilities/authorization";
+import { logger } from "@/utilities/logger";
 import { noContent, success } from "@/utilities/api-response";
 import { parseParams } from "@/utilities/request";
 import * as StorageService from "@/service/storage.service";
@@ -16,6 +17,11 @@ import type { ProtectedContext } from "@/types/auth";
 type IdParams = { id: string };
 type AttachmentParams = { id: string; attachmentId: string };
 
+/** Attachments on internal work notes follow the same rule as the notes themselves. */
+function canSeeWorkNotes(ref: { staffScope: boolean }, auth: ProtectedContext["auth"]): boolean {
+  return ref.staffScope && hasPermission(auth, "tickets.view_work_notes");
+}
+
 async function visibleTicket(id: string, auth: ProtectedContext["auth"]) {
   const ref = await TicketModel.findAccessRef(id, auth);
   if (!ref) throw Errors.notFound("Ticket");
@@ -26,7 +32,7 @@ async function visibleTicket(id: string, auth: ProtectedContext["auth"]) {
 export async function list({ params, auth }: ProtectedContext<IdParams>) {
   const { id } = parseParams(params, idParams);
   const ref = await visibleTicket(id, auth);
-  return success(await AttachmentModel.listForTicket(ref.id));
+  return success(await AttachmentModel.listForTicket(ref.id, { includeWorkNotes: canSeeWorkNotes(ref, auth) }));
 }
 
 /** POST /tickets/:id/attachments : multipart/form-data { file, commentId? }. Needs tickets.comment, or being the requester. */
@@ -51,18 +57,24 @@ export async function upload({ req, params, auth }: ProtectedContext<IdParams>) 
   if (!allowedTypes.includes(mimeType)) throw new ApiError(415, "File type not allowed", undefined, "UNSUPPORTED_MEDIA_TYPE");
 
   const stored = await StorageService.save(bytes);
-  const attachment = await AttachmentModel.create({
-    ticketId: ref.id, commentId: commentId ?? null, uploadedById: auth.userId,
-    fileName: file.name, mimeType, sizeBytes: bytes.byteLength, storageKey: stored.storageKey,
-  });
-  return success(attachment, { status: 201 });
+  try {
+    const attachment = await AttachmentModel.create({
+      ticketId: ref.id, commentId: commentId ?? null, uploadedById: auth.userId,
+      fileName: file.name, mimeType, sizeBytes: bytes.byteLength, storageKey: stored.storageKey,
+    });
+    return success(attachment, { status: 201 });
+  } catch (error) {
+    // Do not leave an orphaned file behind when the metadata row was refused.
+    await StorageService.remove(stored.storageKey).catch((e) => logger.error(`[STORAGE] cleanup failed: ${e}`));
+    throw error;
+  }
 }
 
 /** GET /tickets/:id/attachments/:attachmentId/download : same scope check as the ticket. */
 export async function download({ params, auth }: ProtectedContext<AttachmentParams>) {
   const { id, attachmentId } = parseParams(params, ticketAttachmentParams);
   const ref = await visibleTicket(id, auth);
-  const attachment = await AttachmentModel.findById(ref.id, attachmentId);
+  const attachment = await AttachmentModel.findById(ref.id, attachmentId, { includeWorkNotes: canSeeWorkNotes(ref, auth) });
   if (!attachment) throw Errors.notFound("Attachment");
 
   const stream = await StorageService.openStream(attachment.storageKey);
@@ -81,7 +93,7 @@ export async function download({ params, auth }: ProtectedContext<AttachmentPara
 export async function remove({ params, auth }: ProtectedContext<AttachmentParams>) {
   const { id, attachmentId } = parseParams(params, ticketAttachmentParams);
   const ref = await visibleTicket(id, auth);
-  const attachment = await AttachmentModel.findById(ref.id, attachmentId);
+  const attachment = await AttachmentModel.findById(ref.id, attachmentId, { includeWorkNotes: canSeeWorkNotes(ref, auth) });
   if (!attachment) throw Errors.notFound("Attachment");
   if (attachment.uploadedById !== auth.userId && !hasPermission(auth, "tickets.delete")) throw Errors.forbidden();
 

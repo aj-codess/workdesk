@@ -26,5 +26,5 @@ export async function department({ req, auth }: ProtectedContext) {
 
 /** GET /dashboard/system : the `users` block is included only when the caller also holds users.view. */
 export async function system({ auth }: ProtectedContext) {
-  return success(await DashboardModel.system({ includeUsers: hasPermission(auth, "users.view") }));
+  return success(await DashboardModel.system({ includeUsers: hasPermission(auth, "users.view") }, auth));
 }

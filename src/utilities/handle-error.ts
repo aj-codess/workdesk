@@ -6,7 +6,10 @@ import {logger} from "@/utilities/logger";
 
 export function handleError(error: unknown) {
   if (error instanceof ApiError) {
-    return failure(error.message, error.statusCode, error.details, error.code);
+    const res = failure(error.message, error.statusCode, error.details, error.code);
+    const retry = (error.details as { retryAfterSeconds?: number } | undefined)?.retryAfterSeconds;
+    if (error.statusCode === 429 && retry) res.headers.set("Retry-After", String(retry));
+    return res;
   }
 
   if (error instanceof ZodError) {

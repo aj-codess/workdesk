@@ -1,23 +1,35 @@
-# dependencies and build output
+# dependencies
 node_modules/
-dist/
-coverage/
-*.tsbuildinfo
 
-# secrets and local config
+# Next.js build output
+.next/
+out/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# secrets: never commit
 .env
 .env.*
 !.env.example
 
-# uploads and local data
+# uploaded files and local storage
 storage/
+uploads/
 
-# logs and OS files
+# logs and OS/editor files
 *.log
 npm-debug.log*
 .DS_Store
-Thumbs.db
-
-# editors
 .vscode/
 .idea/
+
+# tests / coverage
+coverage/
+test-results/
+
+# local scratch
+*.local
+.next/
+out/
+next-env.d.ts

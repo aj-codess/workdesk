@@ -17,9 +17,9 @@ Companion docs: `docs/architecture.md` (design), `prisma/schema.prisma` (data).
 | Refresh cookie | `refresh_token`, `HttpOnly; Secure; SameSite=Strict; Path=/api/auth`. Only sent to `/api/auth/*`. |
 | IDs | All `:id` style params are UUIDs. A malformed UUID returns `400 VALIDATION_ERROR`. |
 | Timestamps | ISO 8601 UTC strings. |
-| Success envelope | `{ "data": <T> }`, plus `"meta"` on lists. `204` has no body. |
+| Success envelope | `{ "success": true, "message": "string", "data": <T>, "meta"?: {…} }` (`meta` on lists). `204` has no body. **The route sections below write only the `data` payload (`{ "data": … }`); the wrapper fields are always present.** |
 | Pagination | Query `page` (int ≥1, default 1), `limit` (int 1-100, default 20), `sort`, `order` (`asc`\|`desc`, default `desc`). Response `meta`: `{ "page", "limit", "total", "totalPages" }`. |
-| Error envelope | `{ "error": { "code": "STRING", "message": "human text", "details": [{ "field", "message" }]?, "requestId": "uuid" } }` |
+| Error envelope | `{ "success": false, "message": "human text", "code": "STRING", "details"?: … }`. `details` is the zod issue list for `400`, `{ "retryAfterSeconds" }` for `429` (also sent as the `Retry-After` header). |
 | Unknown body fields | Rejected with `400` (whitelist + forbid non-whitelisted). Never accept `status`, `requesterId`, `assignedAgentId`, `passwordHash`, etc. unless the route lists them. |
 | Never returned | `passwordHash`, token hashes, `failedLoginCount`. |
 | Out-of-scope records | Return `404 NOT_FOUND`, not `403`, so ids cannot be probed. `403` is only for a missing permission. |

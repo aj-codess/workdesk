@@ -4,12 +4,18 @@ import { env } from "@/config/env";
 import { Errors } from "@/utilities/api-error";
 import type { RequestMeta } from "@/types/auth";
 
+/**
+ * Client IP for rate limiting, lockout logs and audit rows.
+ * X-Forwarded-For is client-controlled unless a trusted reverse proxy overwrites it, so it is only read when
+ * TRUST_PROXY=true, and then the RIGHTMOST entry (the one our proxy appended) is used, never the leftmost.
+ */
 export function getRequestMeta(req: NextRequest): RequestMeta {
-  const forwarded = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  return {
-    ip: forwarded || req.headers.get("x-real-ip") || null,
-    userAgent: req.headers.get("user-agent"),
-  };
+  let ip: string | null = null;
+  if (env.TRUST_PROXY) {
+    const parts = req.headers.get("x-forwarded-for")?.split(",").map((p) => p.trim()).filter(Boolean);
+    ip = req.headers.get("x-real-ip")?.trim() || parts?.[parts.length - 1] || null;
+  }
+  return { ip, userAgent: req.headers.get("user-agent") };
 }
 
 export function getBearerToken(req: NextRequest): string | null {

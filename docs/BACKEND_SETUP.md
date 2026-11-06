@@ -1,134 +1,116 @@
 # WorkDesk Backend: Setup Guide
 
-NestJS 11 · TypeScript 5.9 · Prisma 6.19 · PostgreSQL 16. The backend lives at the repository root.
-Route contract: `docs/API_ROUTES.md`. Design: `docs/architecture.md`.
+Next.js 15 (App Router route handlers) · TypeScript 5.9 · Prisma 6.19 · PostgreSQL 16.
+Route contract: `docs/API_ROUTES.md`. Design: `docs/architecture.md` (its NestJS wording is superseded by this file).
+
+## Request flow
+
+```
+src/app/api/**/route.ts      HTTP entry. Declares method, permissions, rate limit via publicRoute / protectedRoute
+  -> src/middleware/*        rate limit -> authenticate (JWT + live session + ACTIVE user) -> permission check
+  -> src/controller/*        parse + validate (src/validators, zod .strict()), orchestrate, shape the response
+  -> src/models/*            ALL database calls (Prisma): scope, state machine, transactions, audit rows
+  -> src/service/*           external / non-DB work: JWT, argon2, mail, file storage, CSV, rate-limit store
+src/utilities/*              errors, response envelope, cookies, request meta, mappers
+src/config/*                 env (validated), permissions catalogue, settings whitelist, rate-limit rules
+src/middleware.ts            edge CORS for the separate frontend origin
+src/instrumentation.ts       fails the process at boot on an invalid or unsafe production configuration
+```
+
+A controller never calls Prisma. A model never touches HTTP.
 
 ## Prerequisites
 
-| Tool | Version | Check |
-|---|---|---|
-| Node.js | 20 or newer (22 works) | `node -v` |
-| npm | 10 or newer | `npm -v` |
-| Docker + Compose | any recent | `docker compose version` (only needed for the bundled database) |
+Node 20.9+ (22 recommended), npm 10+, Docker (for the bundled Postgres) or your own PostgreSQL 16.
 
-No Docker? Install PostgreSQL 16 yourself, create a `workdesk` database and user, and point `DATABASE_URL` at it.
-
-## 1. Put the files in place
-
-Unzip the delivery at the repository root. It replaces the empty `package.json`, `server.ts`, `src/app.ts`, `prisma.config.ts`, `.env.example` and `.gitignore`, and adds the rest.
-
-## 2. Environment
+## 1. Install
 
 ```bash
+npm install            # postinstall runs `prisma generate`
 cp .env.example .env
-node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"   # paste into JWT_ACCESS_SECRET
 ```
-Paste the printed value into `JWT_ACCESS_SECRET` in `.env`. Leave the rest as is for local development. `.env` is git-ignored; never commit it.
+Prisma is pinned to 6.19.x because the schema keeps `url = env("DATABASE_URL")` in the datasource block. Do not run `npm install prisma@latest`.
+Never commit `.env`.
 
-The app validates `.env` on start and exits with a list of what is wrong. In production it also refuses the placeholder secret and requires `COOKIE_SECURE=true`.
-
-## 3. Install
+## 2. Database and migrations
 
 ```bash
-npm install
-```
-This pins Prisma to 6.19.x on purpose. Your `schema.prisma` keeps `url = env("DATABASE_URL")` inside the datasource block, which is the Prisma 6 style. Do not run `npm install prisma@latest`.
-
-## 4. Database
-
-```bash
-npm run db:up                  # starts Postgres 16 in Docker
-docker compose ps              # wait until the db shows "healthy"
-```
-
-## 5. Prisma: client and migrations
-
-```bash
-npx prisma validate
-npx prisma generate
+npm run db:up                                   # Postgres 16 in Docker, wait for "healthy"
 npx prisma migrate dev --name init
-```
-Then add the hardening SQL (constraints, partial indexes, append-only audit trigger):
-```bash
 npx prisma migrate dev --create-only --name db_hardening
-# open the new prisma/migrations/<timestamp>_db_hardening/migration.sql
-# and paste the contents of prisma/sql/db_hardening.sql into it
-npx prisma migrate dev
-npx prisma migrate dev         # run once more: it should report the database is in sync
+# paste prisma/sql/db_hardening.sql into the new migrations/<timestamp>_db_hardening/migration.sql
+npx prisma migrate dev                          # applies it
+npx prisma migrate dev                          # second run must report "in sync"
 ```
-If that last run proposes dropping the partial or trigram indexes, stop and tell me. Prisma cannot model them, and they will need a post-migrate step instead.
+The hardening migration adds what Prisma cannot model: CHECK constraints, the one-current-assignment partial unique index, the trigram search index and the append-only trigger on `audit_logs`. If the last `migrate dev` proposes dropping any of them, stop and tell me.
 
-## 6. Run
+## 3. Seed
 
 ```bash
-npm run dev
+npm run prisma:seed
+```
+Idempotent. Creates the permission catalogue, the five system roles (System Administrator, Support Manager, Support Agent, Employee, Auditor (read-only)) with their default bundles, and the first administrator from `SEED_ADMIN_EMAIL` / `SEED_ADMIN_PASSWORD`. Role bundles are written only when a role is first created, so later edits in the UI are never overwritten; the System Administrator always receives any new catalogue key.
+`SEED_DEMO=true` also creates demo departments, categories and one user per role (password `SEED_DEMO_PASSWORD`). It is refused when `NODE_ENV=production`.
+
+## 4. Run
+
+```bash
+npm run dev            # http://localhost:4000
+curl localhost:4000/api/health/ready
 ```
 
-| Check | Expect |
+## 5. Tests
+
+The end-to-end suite drives a LIVE server and covers the eight assignment scenarios plus the security properties behind them (IDOR, escalation, last-admin, token rotation and reuse, lockout, rate limits, upload checks, report scope, CSV injection).
+
+```bash
+SEED_DEMO=true npm run prisma:seed
+TRUST_PROXY=true npm run dev          # tests give each client its own X-Forwarded-For address
+npm run test:e2e                      # E2E_BASE_URL=http://localhost:4000 by default
+```
+Set `CRON_SECRET` in both the server and the test shell to include the housekeeping check. Note the suite creates users and roles with random names and, in its last test, temporarily deactivates other administrators (it reactivates the seeded one). Run it against a development database only.
+
+## Production checklist
+
+| Item | Setting |
 |---|---|
-| `curl localhost:4000/api/health` | `{"data":{"status":"ok", ...}}` |
-| `curl localhost:4000/api/health/ready` | `{"data":{"status":"ok","database":"up"}}` (503 if the database is unreachable) |
-| Browser: `http://localhost:4000/api/docs` | Swagger UI |
+| Secrets | `JWT_ACCESS_SECRET` random, 32+ characters, not the placeholder. The app refuses to boot otherwise |
+| Cookies | `COOKIE_SECURE=true` (enforced). Refresh cookie is `HttpOnly; SameSite=Strict; Path=/api/auth`, so serve the frontend and API from the same site (for example `app.example.com` and `api.example.com`) |
+| CORS | `CORS_ORIGINS=https://app.example.com` (never `*`) |
+| Reverse proxy | Terminate TLS there and set `TRUST_PROXY=true` **only** if the proxy overwrites `X-Forwarded-For` / `X-Real-IP`. Without it every client shares one rate-limit bucket (the API cannot see socket addresses in route handlers) |
+| Rate limiting | In-memory, per instance: with N instances the effective limit is N times higher. Per-account lockout and the password-reset throttle are in the database and are not affected. For multi-instance deployments replace the body of `src/service/rate-limit.service.ts` with Redis (`INCR` + `EXPIRE`) or enforce limits at the edge; the `consume` signature stays |
+| Mail | Set `SMTP_URL`. Without it production logs an error and sends nothing (reset links are never logged in production) |
+| Uploads | `UPLOAD_DIR` on a persistent volume, outside any web root. Files are stored under random keys, type-checked by content (PNG, JPEG, PDF, plain text), 5 MB max |
+| Migrations | `npx prisma migrate deploy`, never `migrate dev`. In Docker: `docker compose --profile app run --rm migrate` |
+| Housekeeping | Schedule `POST /api/internal/housekeeping` daily with `Authorization: Bearer $CRON_SECRET`. It purges expired refresh and reset tokens, old sessions and login attempts older than 30 days. `audit_logs` is never purged. Without `CRON_SECRET` the route answers 404 |
+| Backups | Back up PostgreSQL and `UPLOAD_DIR` together |
+| Logs | JSON lines on stdout in production. `LOG_LEVEL=debug|info|warn|error` |
 
-## 7. Tests
+### Docker
 
 ```bash
-npm test
+docker compose --profile app up --build       # db, one-off migrate + seed, then the API on :4000
 ```
+`Dockerfile` targets: `migrate` (Prisma CLI, applies migrations and seeds) and `runner` (default, Next.js standalone output, non-root, healthcheck on `/api/health`). Set real secrets in `.env` first. The migration step needs the `prisma/migrations` folder you generate in step 2 to be committed.
 
 ## Scripts
 
 | Script | Does |
 |---|---|
-| `npm run dev` | build and run with file watching |
-| `npm run build` / `npm run start:prod` | production build, then `node dist/server.js` |
-| `npm run typecheck` | TypeScript check with no output |
-| `npm test` | Jest (specs live in `src/tests`) |
-| `npm run db:up` / `db:down` | start / stop the Docker database |
-| `npm run prisma:migrate` | `prisma migrate dev` |
-| `npm run prisma:deploy` | `prisma migrate deploy` (production) |
-| `npm run prisma:seed` | run `prisma/seed.ts` (the file arrives in a later delivery) |
-| `npm run prisma:studio` | browse the database |
-
-## Where things go
-
-The assignment requires NestJS (modules and dependency injection), so this is a NestJS app laid out in your folders:
-
-| Path | Holds |
-|---|---|
-| `server.ts` | Bootstrap: helmet, cookies, CORS, `/api` prefix, validation pipe, Swagger |
-| `src/app.ts` | Root module. Register each controller and provider here, or group them into `*.module.ts` files beside it |
-| `src/config/` | Typed, validated environment (`env.ts`) |
-| `src/routes/` | Optional: route-path constants and Swagger tag names, so paths are not repeated as strings |
-| `src/controller/` | HTTP layer, `*.controller.ts`. Parse the request, call a service, return. No business rules |
-| `src/service/` | Business logic and database access, `*.service.ts` (`PrismaService` is here) |
-| `src/middleware/` | Guards, interceptors, exception filters, decorators, pipes (`JwtAuthGuard`, `PermissionsGuard`, `@RequirePermissions`) |
-| `src/models/` | Request DTOs (class-validator), response mappers, enums |
-| `src/utilities/` | Pure helpers: hashing, token generation, pagination, the ticket state machine |
-| `src/tests/` | Jest specs (`*.spec.ts`) |
-| `prisma/` | `schema.prisma`, `migrations/`, `sql/`, and later `seed.ts` |
-| `postman_bundle/` | Postman collection and environment |
-
-MVC mapping for the review: **Model** = Prisma schema plus `src/models`; **View** = response mappers on the API side and the Next.js app on the client; **Controller** = `src/controller` plus `src/service`.
-
-Rule of thumb: controller = HTTP, service = decisions, Prisma = SQL. A controller never touches `PrismaService` directly.
+| `npm run dev` / `build` / `start` | Next.js dev server, production build, production server (port 4000) |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run test:e2e` | Vitest scenarios against a live server |
+| `npm run db:up` / `db:down` | Start / stop the Docker database |
+| `npm run prisma:migrate` / `prisma:deploy` / `prisma:seed` / `prisma:studio` | Prisma CLI helpers |
 
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
-| `Invalid environment configuration` on start | Read the listed variables; copy `.env.example` to `.env` first |
-| `Environment variable not found: DATABASE_URL` from Prisma | `.env` is missing or not in the repo root |
-| `P1001: Can't reach database server` | `npm run db:up`, wait for "healthy", and check the port in `DATABASE_URL` |
-| Port 5432 already in use | Set `POSTGRES_PORT=5433` and the same port inside `DATABASE_URL` |
-| `Failed to fetch the engine file ... 403` during `prisma generate` | A firewall or proxy is blocking `binaries.prisma.sh`. Allow it, or run on another network |
-| `EADDRINUSE` on 4000 | Change `PORT` in `.env` |
-| TypeScript says `PrismaClient` is not exported | Run `npx prisma generate` |
-
-## Seeding note
-
-`users.status` defaults to `INACTIVE` in your schema. The seed script must create the demo users with `status: 'ACTIVE'` explicitly, or they will not be able to sign in.
-
-## Handing the backend back to me
-
-When you have implemented routes, zip the project **without** `node_modules`, `dist`, `.git` and `.env`, and send it. I will check it against `docs/API_ROUTES.md`, with particular attention to authorization gaps, before we start the frontend.
+| `Invalid environment configuration` / `Unsafe production configuration` at start | Read the listed variables and fix `.env` |
+| Everything returns 429 in production | `TRUST_PROXY` is false behind a proxy: all clients share one bucket |
+| Login works but the browser never sends the refresh cookie | Frontend and API are different sites (SameSite=Strict) or `COOKIE_SECURE=true` over plain HTTP |
+| `P1001: Can't reach database server` | `npm run db:up`, wait for healthy, check the port in `DATABASE_URL` |
+| `Failed to fetch the engine file ... 403` during `prisma generate` | A firewall blocks `binaries.prisma.sh`; allow it or use another network |
+| Seeded users cannot sign in | They must be `ACTIVE`; the schema default is `INACTIVE` (the seed sets it explicitly) |
