@@ -1,6 +1,6 @@
 // Idempotent seed. Safe to run on every deploy.
 //   - permission catalogue (upsert by key)
-//   - system roles with their default bundles (a role's permissions are only set when the role is CREATED, so an
+//   - system roles with their default bundles (a role's permissions are set when the role is CREATED (or when it holds none at all), so an
 //     administrator's later edits are never overwritten; the System Administrator always gets the full catalogue)
 //   - the first administrator, from SEED_ADMIN_* (created only when that email does not exist yet)
 //   - optional demo data when SEED_DEMO=true (refused in production)
@@ -10,8 +10,6 @@ import { hash } from "../src/service/password.service";
 import { PERMISSIONS } from "../src/config/permissions";
 
 const prisma = new PrismaClient();
-
-
 const isProd = process.env.NODE_ENV === "production";
 
 const DESCRIPTIONS: Record<string, string> = {
@@ -95,6 +93,14 @@ async function seedCatalogue() {
         data: PERMISSIONS.map((k) => ({ roleId: existing.id, permissionId: idOf.get(k)! })),
         skipDuplicates: true,
       });
+    } else if ((await prisma.rolePermission.count({ where: { roleId: existing.id } })) === 0) {
+      // Repair: a system role that exists but holds nothing (created before the catalogue was loaded) gives its
+      // holders no access at all. Give it its default bundle. A role that has any permission is never touched.
+      await prisma.rolePermission.createMany({
+        data: bundle.permissions.map((k) => ({ roleId: existing.id, permissionId: idOf.get(k)! })),
+        skipDuplicates: true,
+      });
+      console.log(`repaired empty role ${name}`);
     }
   }
 }
